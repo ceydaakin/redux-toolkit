@@ -36,6 +36,7 @@ import { createRenderStream } from '@testing-library/react-render-stream/pure'
 import { userEvent } from '@testing-library/user-event'
 import { HttpResponse, delay, http } from 'msw'
 import * as React from 'react'
+import { Provider } from 'react-redux'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { InfiniteQueryResultFlags } from '../core/buildSelectors'
 
@@ -4237,5 +4238,90 @@ describe('skip behavior', () => {
       data: { name: 'Timmy' },
       currentData: undefined,
     })
+  })
+})
+
+describe('Provider store changes', () => {
+  const swapApi = createApi({
+    baseQuery: async () => ({ data: null }),
+    endpoints: (build) => ({
+      getPost: build.query<{ id: number }, number>({
+        queryFn: (id) => ({ data: { id } }),
+      }),
+    }),
+  })
+
+  const makeStore = () =>
+    configureStore({
+      reducer: { [swapApi.reducerPath]: swapApi.reducer },
+      middleware: (gDM) => gDM().concat(swapApi.middleware),
+    })
+
+  const subscriptionCount = (
+    store: ReturnType<typeof makeStore>,
+    queryCacheKey: string,
+  ) =>
+    (
+      store.dispatch(
+        swapApi.internalActions.internal_getRTKQSubscriptions(),
+      ) as unknown as SubscriptionSelectors
+    ).getSubscriptionCount(queryCacheKey)
+
+  const makeWrapper = (getStore: () => ReturnType<typeof makeStore>) =>
+    function Wrapper({ children }: { children: React.ReactNode }) {
+      return <Provider store={getStore()}>{children}</Provider>
+    }
+
+  test('useQuery subscribes to the new store after a store swap', async () => {
+    const storeA = makeStore()
+    const storeB = makeStore()
+    let currentStore = storeA
+
+    const { result, rerender } = renderHook(
+      () => swapApi.endpoints.getPost.useQuery(21),
+      { wrapper: makeWrapper(() => currentStore) },
+    )
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+
+    currentStore = storeB
+    rerender()
+
+    await waitFor(() =>
+      expect(
+        swapApi.endpoints.getPost.select(21)(storeB.getState()).status,
+      ).toBe(QueryStatus.fulfilled),
+    )
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+    expect(result.current.data).toEqual({ id: 21 })
+
+    // the hook left storeA, so its subscription there is released
+    expect(subscriptionCount(storeA, 'getPost(21)')).toBe(0)
+    expect(subscriptionCount(storeB, 'getPost(21)')).toBe(1)
+  })
+
+  test('useLazyQuery re-runs the last trigger arg against the new store', async () => {
+    const storeA = makeStore()
+    const storeB = makeStore()
+    let currentStore = storeA
+
+    const { result, rerender } = renderHook(
+      () => swapApi.endpoints.getPost.useLazyQuery(),
+      { wrapper: makeWrapper(() => currentStore) },
+    )
+    act(() => {
+      result.current[0](7)
+    })
+    await waitFor(() => expect(result.current[1].isSuccess).toBe(true))
+
+    currentStore = storeB
+    rerender()
+
+    await waitFor(() =>
+      expect(
+        swapApi.endpoints.getPost.select(7)(storeB.getState()).status,
+      ).toBe(QueryStatus.fulfilled),
+    )
+    await waitFor(() => expect(result.current[1].isSuccess).toBe(true))
+    expect(subscriptionCount(storeA, 'getPost(7)')).toBe(0)
   })
 })

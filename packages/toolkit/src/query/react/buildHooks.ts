@@ -1714,8 +1714,17 @@ export function buildHooks<Definitions extends EndpointDefinitions>({
     const dispatch = useDispatch<ThunkDispatch<any, any, UnknownAction>>()
 
     const subscriptionSelectorsRef = useRef<SubscriptionSelectors>(undefined)
+    // The `<Provider>` store can change while this hook stays mounted.
+    // Track which store's `dispatch` the selectors and the current
+    // subscription belong to, so we re-subscribe against the new store.
+    const subscriptionSelectorsDispatchRef = useRef(dispatch)
+    const promiseDispatchRef = useRef(dispatch)
 
-    if (!subscriptionSelectorsRef.current) {
+    if (
+      !subscriptionSelectorsRef.current ||
+      subscriptionSelectorsDispatchRef.current !== dispatch
+    ) {
+      subscriptionSelectorsDispatchRef.current = dispatch
       const returnedValue = dispatch(
         api.internalActions.internal_getRTKQSubscriptions(),
       )
@@ -1756,10 +1765,14 @@ export function buildHooks<Definitions extends EndpointDefinitions>({
 
     let { queryCacheKey, requestId } = promiseRef.current || {}
 
+    const storeChanged =
+      promiseRef.current !== undefined &&
+      promiseDispatchRef.current !== dispatch
+
     // HACK We've saved the middleware subscription lookup callbacks into a ref,
     // so we can directly check here if the subscription exists for this query.
     let currentRenderHasSubscription = false
-    if (queryCacheKey && requestId) {
+    if (queryCacheKey && requestId && !storeChanged) {
       currentRenderHasSubscription =
         subscriptionSelectorsRef.current.isRequestSubscribed(
           queryCacheKey,
@@ -1768,7 +1781,9 @@ export function buildHooks<Definitions extends EndpointDefinitions>({
     }
 
     const subscriptionRemoved =
-      !currentRenderHasSubscription && promiseRef.current !== undefined
+      !storeChanged &&
+      !currentRenderHasSubscription &&
+      promiseRef.current !== undefined
 
     usePossiblyImmediateEffect((): void | undefined => {
       if (subscriptionRemoved) {
@@ -1794,7 +1809,11 @@ export function buildHooks<Definitions extends EndpointDefinitions>({
 
       const lastSubscriptionOptions = promiseRef.current?.subscriptionOptions
 
-      if (!lastPromise || lastPromise.arg !== stableArg) {
+      if (
+        !lastPromise ||
+        lastPromise.arg !== stableArg ||
+        promiseDispatchRef.current !== dispatch
+      ) {
         lastPromise?.unsubscribe()
         const promise = dispatch(
           initiate(stableArg, {
@@ -1810,6 +1829,7 @@ export function buildHooks<Definitions extends EndpointDefinitions>({
         )
 
         promiseRef.current = promise as T
+        promiseDispatchRef.current = dispatch
       } else if (stableSubscriptionOptions !== lastSubscriptionOptions) {
         lastPromise.updateSubscriptionOptions(stableSubscriptionOptions)
       }
@@ -1968,6 +1988,8 @@ export function buildHooks<Definitions extends EndpointDefinitions>({
       const [arg, setArg] = useState<any>(UNINITIALIZED_VALUE)
 
       const promiseRef = useRef<QueryActionCreatorResult<any>>(undefined)
+      // the store `dispatch` that `promiseRef` was subscribed through
+      const promiseDispatchRef = useRef(dispatch)
 
       const stableSubscriptionOptions = useShallowStableValue({
         refetchOnReconnect,
@@ -2004,6 +2026,7 @@ export function buildHooks<Definitions extends EndpointDefinitions>({
                 forceRefetch: !preferCacheValue,
               }),
             )
+            promiseDispatchRef.current = dispatch
 
             setArg(arg)
           })
@@ -2031,11 +2054,15 @@ export function buildHooks<Definitions extends EndpointDefinitions>({
       }, [])
 
       /* if "cleanup on unmount" was triggered from a fast refresh, we want to reinstate the query */
+      /* same if the `<Provider>` store changed: subscribe to the last arg in the new store */
       useEffect(() => {
-        if (arg !== UNINITIALIZED_VALUE && !promiseRef.current) {
+        if (
+          arg !== UNINITIALIZED_VALUE &&
+          (!promiseRef.current || promiseDispatchRef.current !== dispatch)
+        ) {
           trigger(arg, true)
         }
-      }, [arg, trigger])
+      }, [arg, trigger, dispatch])
 
       return useMemo(
         () => [trigger, arg, { reset }] as const,
